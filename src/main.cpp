@@ -14,11 +14,9 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-
-
 int day,hours,minutes,seconds,year,month,date,minuteSave;
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP,"europe.pool.ntp.org", 3600, 60000);
+NTPClient timeClient(ntpUDP,"europe.pool.ntp.org", 7200, 60000);
 #define DHTPIN 23     // Digital pin connected to the DHT sensor
 #define DHTTYPE    DHT22     // DHT 11
 DHT dht(DHTPIN, DHTTYPE);
@@ -30,23 +28,26 @@ char WIFI_SSID[]="Aswin";
 char WIFI_PASSWORD[]="Pi@Riya*1";
 char HOST_ADDRESS[]="a1gcytxbxjm16j-ats.iot.eu-west-1.amazonaws.com";
 char CLIENT_ID[]= "ESP32_02";
-char TOPIC_PJ[] = "sdkTest/";
-char TOPIC_NAME[] = "sdkTest/ESP32_02";
+//char TOPIC_PJ[] = "sdkTest/";
+char TOPIC_NAME[] = "home/b001";
 
 //#define HOST_NAME *CLIENT_ID;
 int status = WL_IDLE_STATUS;
 RemoteDebug Debug;
 const char* host = "ESP32_H01";
-int tick=0,msgCount=0,msgReceived = 0,publishMsg=0;;
+int tick=0,msgCount=0,msgReceived = 0,publishMsg=0, sensorfail =0;
 char payload[512];
 char rcvdPayload[512];
 //reset after fail publish
 int publicfail = 5;
 int publicfailCount = 5;
+int i = 0;
+int samplect = 200;
+float ph,rawadc = 0.00;
 
-float h,t;
+float h,t,dallas_t;
 String formattedTime;
-
+String IP_adr;
 //config ph meter
 
 // Data wire is plugged into port 2 on the Arduino
@@ -75,13 +76,18 @@ void setup()
   pinMode(ledPin, OUTPUT);
   Serial.begin(115200);
   initWifi();
+  IP_adr = WiFi.localIP().toString();
 	initRemoteDebug();
 	initAWS();
-  analogSetPinAttenuation (34, ADC_11db);
+  analogSetAttenuation(ADC_11db);
+  adcAttachPin(34);
+  analogSetCycles(255);
+  analogSetClockDiv(255); // 1338mS
+
   sensors.begin();     //dallas start
-	initOTA ();
 	dht.begin();
 	timeClient.begin();
+  initOTA ();
   Debug.println("Setup Ok");
   delay(500);
 }
@@ -93,48 +99,66 @@ void loop()
   IOT_received_msg();
 	timeClient.update();
 	minutes = timeClient.getMinutes();
+  formattedTime = timeClient.getTimeStampString();
+  h = dht.readHumidity();
+  t = dht.readTemperature();
+  sensors.requestTemperatures();
+  dallas_t = sensors.getTempCByIndex(0);
 
-	h = dht.readHumidity();
-	t = dht.readTemperature();
-
-
-	if (isnan(h) || isnan(t)) {
-			Debug.println("Failed to read from DHT sensor!");
-			delay(2000);
-	}
-	else
-	{
-			// Create the payload for publishing
-			formattedTime = timeClient.getTimeStampString();
-			snprintf(payload,sizeof(payload),"{\n \"thingid\":\"ESP32_02\", \"Temperature\":%.2f, \"Humidity\":%.2f, \"datetime\":\"%s\" \n}" ,t,h,formattedTime.c_str() );
-			publishMsg =1;
-
-	}
-
-
-
-  if ((minutes != minuteSave)&&(publishMsg ==1))
+  for(i =0; i <samplect; i++)
   {
-			Debug.println("Sending Response");
-			Debug.println(formattedTime);
-			Debug.print("temperature : ");
-			Debug.println(t);
-			Debug.print("Hum : ");
-			Debug.println(h);
-			IOT_send_msg();
-			digitalWrite(ledPin,  HIGH);
-			minuteSave = timeClient.getMinutes();;
+    rawadc = rawadc + analogRead(34);
+  }
+  // ph = (rawadc/samplect)*0.00233489;
+    ph = ((rawadc/samplect)-4925)/-275;
+  //https://www.mathportal.org/calculators/analytic-geometry/two-point-form-calculator.php
+  // BNC to GND = 3000 (2,5V) & 7ph, Amonnique  1900 (1,65V) & 14ph
 
-      publishMsg =1;
-      sprintf(payload,"Hi ESSILOR demo IOT %s", formattedTime.c_str());
-      if(hornbill.publish(TOPIC_NAME,payload) == 0)
+  rawadc =0;
+
+
+  if ((minutes == 0)||(minutes == 10)||(minutes == 20)||(minutes == 30)||(minutes == 40)||(minutes == 50)||(sensorfail==1))
+  {
+    if (isnan(h) || isnan(t)) {
+        Debug.println("Failed to read from DHT sensor!");
+        delay(2000);
+        publishMsg =0;
+        sensorfail =1;
+    }
+    else
+    {
+        // Create the payload for publishing
+        formattedTime = timeClient.getTimeStampString();
+        snprintf(payload,sizeof(payload),"{\"thingid\": \"%X\", \"IP_adr\": \"%s\", \"DHT22_t\": %.2f, \"DHT22_h\": %.2f, \"Dallas_t\": %.2f, \"ph\": %.2f, \"datetime\": \"%s\"}" ,WiFi.macAddress(),IP_adr.c_str(),t,h,dallas_t,ph,formattedTime.c_str() );
+  //    snprintf(payload,sizeof(payload),"{\n \"thingid\":\"%X\",  \"DHT22_t\":%.2f, \"DHT22_h\":%.2f, \"datetime\":\"%s\" \n}" ,WiFi.macAddress(),t,h,formattedTime.c_str() );
+        publishMsg =1;
+        sensorfail =0;
+    }
+  }
+//  if (((minutes == 0)||(minutes == 20)||(minutes == 40))&&(publishMsg ==1))
+  if (minutes != minuteSave)
+  {
+      if(publishMsg ==1)
       {
-        Debug.print("Publish Message:");
-        Debug.println(payload);
+              Debug.println("Sending Response");
+        IOT_send_msg();
+        digitalWrite(ledPin,  HIGH);
+        delay(10000);
       }
+			Debug.println(formattedTime);
+			Debug.print("dht22_t: ");
+			Debug.println(t);
+			Debug.print("dht22_h: ");
+			Debug.println(h);
+      Debug.print("dallas_t: ");
+      Debug.println(dallas_t);
+      Debug.print("ph: ");
+      Debug.println(ph);
+
+			minuteSave = timeClient.getMinutes();;
 	}
   digitalWrite(ledPin,  LOW);    // turn the LED off by making the voltage LOW
-  delay(100);
+  //delay(100);
 }
 
 void IOT_send_msg()
@@ -150,13 +174,13 @@ void IOT_send_msg()
       publicfail = publicfail -1;
       Debug.print("Publish Fail:");
       Debug.println(publicfail);
-			delay(10000);
+      publishMsg =1;
+			delay(1000);
       if (publicfail == 0)
       {
           publicfail = publicfailCount;
 					ESP.restart();
 			}
-
   }
 }
 
